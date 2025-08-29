@@ -1,0 +1,101 @@
+USE [database_name]
+GO
+/****** Object:  StoredProcedure [dbo].[Substitution_database_all_PHI_PII_Columns]    Script Date: 8/21/2025 4:17:24 PM ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+ALTER   PROCEDURE [dbo].[Substitution_database_all_PHI_PII_Columns]
+    @DatabaseName NVARCHAR(128)
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    -- Step 1: Prepare a temp table to hold metadata
+    CREATE TABLE #TableColumns (
+        SchemaName NVARCHAR(128),
+        TableName NVARCHAR(128),
+        ColumnName NVARCHAR(128),
+        DataType NVARCHAR(128)
+    );
+
+    -- Step 2: Insert metadata using dynamic SQL
+    DECLARE @MetaSQL NVARCHAR(MAX);
+
+    SET @MetaSQL = '
+        INSERT INTO #TableColumns
+        SELECT s.name AS SchemaName, t.name AS TableName, c.name AS ColumnName, ty.name AS DataType
+        FROM [' + @DatabaseName + '].sys.tables t
+        JOIN [' + @DatabaseName + '].sys.schemas s ON t.schema_id = s.schema_id
+        JOIN [' + @DatabaseName + '].sys.columns c ON t.object_id = c.object_id
+        JOIN [' + @DatabaseName + '].sys.types ty ON c.user_type_id = ty.user_type_id
+        LEFT JOIN (
+            SELECT ic.object_id, ic.column_id
+            FROM [' + @DatabaseName + '].sys.indexes i
+            JOIN [' + @DatabaseName + '].sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+            WHERE i.is_primary_key = 1
+        ) pk ON c.object_id = pk.object_id AND c.column_id = pk.column_id
+        WHERE t.is_ms_shipped = 0 
+          AND c.is_identity = 0 
+          AND c.is_computed = 0
+          AND pk.column_id IS NULL
+    ';
+    EXEC sp_executesql @MetaSQL;
+
+    -- Step 3: Declare the cursor on the temp table
+    DECLARE @SchemaName NVARCHAR(128), @TableName NVARCHAR(128), @ColumnName NVARCHAR(128), @DataType NVARCHAR(128);
+    DECLARE @SQL NVARCHAR(MAX), @QualifiedTableName NVARCHAR(300);
+
+    DECLARE TableCursor CURSOR FOR
+        SELECT SchemaName, TableName, ColumnName, DataType FROM #TableColumns;
+
+    OPEN TableCursor;
+    FETCH NEXT FROM TableCursor INTO @SchemaName, @TableName, @ColumnName, @DataType;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        SET @QualifiedTableName = QUOTENAME(@DatabaseName) + '.' + QUOTENAME(@SchemaName) + '.' + QUOTENAME(@TableName);
+
+        IF @ColumnName IN ('column1','column2'
+)
+        BEGIN
+            SET @SQL = 'UPDATE ' + @QualifiedTableName + ' SET [' + @ColumnName + '] = '
+
+            IF @ColumnName IN ('column1','column2')              
+                SET @SQL +=  'dbo.ascii_string(' + QUOTENAME(@ColumnName) + ')  '
+
+            ELSE IF @ColumnName IN ('column1','column2')            
+                SET @SQL +=  'dbo.ascii_date_temp(' + QUOTENAME(@ColumnName) + ')  '
+
+            ELSE IF @ColumnName IN ('column1','column2')
+                 SET @SQL +=  'dbo.ascii_address(' + QUOTENAME(@ColumnName) + ')  '
+
+            ELSE IF @ColumnName LIKE '%email%'    
+                SET @SQL = '
+                     UPDATE ' + @QualifiedTableName + '
+        SET [' + @ColumnName + '] = 
+            CASE 
+                WHEN CHARINDEX(''@'', [' + @ColumnName + ']) > 1 THEN
+                    ''user_'' + LEFT(REPLACE(CONVERT(NVARCHAR(36), NEWID()), ''-'', ''''), CHARINDEX(''@'', [' + @ColumnName + ']) - 1) +
+                    SUBSTRING([' + @ColumnName + '], CHARINDEX(''@'', [' + @ColumnName + ']), LEN([' + @ColumnName + ']))
+                ELSE
+                    ''user_'' + LEFT(REPLACE(CONVERT(NVARCHAR(36), NEWID()), ''-'', ''''), 8)
+            END
+        WHERE [' + @ColumnName + '] IS NOT NULL AND [' + @ColumnName + '] <> ''''
+    ';
+
+            ELSE
+                SET @SQL = NULL;
+
+            IF @SQL IS NOT NULL
+                EXEC sp_executesql @SQL;
+        END
+
+        FETCH NEXT FROM TableCursor INTO @SchemaName, @TableName, @ColumnName, @DataType;
+    END
+
+    CLOSE TableCursor;
+    DEALLOCATE TableCursor;
+    DROP TABLE #TableColumns;
+END
